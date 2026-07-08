@@ -1,21 +1,46 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { formatDistanceToNow, format } from 'date-fns'
-import { getTodayTotal, getCurrentStreak, getWeekTotal } from '@/lib/analytics'
-import { StudySession, addSession, generateId, getStoredSessions } from '@/lib/storage'
+import { format } from 'date-fns'
+import { createClient } from '@/lib/supabase/client'
 import { ArrowUp, Plus } from 'lucide-react'
 
-export function Timer() {
+interface StudySession {
+  id: string
+  user_id: string
+  duration_minutes: number
+  date: string
+  created_at: string
+}
+
+export function Timer({ userId }: { userId: string }) {
+  const supabase = createClient()
   const [isRunning, setIsRunning] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [startTimeRef, setStartTimeRef] = useState<Date | null>(null)
   const [showManualForm, setShowManualForm] = useState(false)
   const [sessions, setSessions] = useState<StudySession[]>([])
+  const [loading, setLoading] = useState(true)
 
+  // Fetch sessions from Supabase
   useEffect(() => {
-    setSessions(getStoredSessions())
-  }, [])
+    const fetchSessions = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('study_sessions')
+          .select('*')
+          .eq('user_id', userId)
+          .order('date', { ascending: false })
+
+        if (error) throw error
+        setSessions(data || [])
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchSessions()
+  }, [userId, supabase])
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
@@ -38,60 +63,133 @@ export function Timer() {
     setStartTimeRef(new Date())
   }
 
-  const handleStop = () => {
+  const handleStop = async () => {
     if (!startTimeRef) return
 
-    const endTime = new Date()
-    const session: StudySession = {
-      id: generateId(),
-      date: format(startTimeRef, 'yyyy-MM-dd'),
-      startTime: startTimeRef.toISOString(),
-      endTime: endTime.toISOString(),
-      durationSeconds: elapsedSeconds,
-    }
+    const durationMinutes = Math.round(elapsedSeconds / 60)
+    const date = format(startTimeRef, 'yyyy-MM-dd')
 
-    addSession(session)
-    const updatedSessions = getStoredSessions()
-    setSessions(updatedSessions)
+    try {
+      const { data, error } = await supabase
+        .from('study_sessions')
+        .insert({
+          user_id: userId,
+          duration_minutes: durationMinutes,
+          date,
+        })
+        .select()
+
+      if (error) throw error
+
+      if (data && data.length > 0) {
+        setSessions([data[0], ...sessions])
+      }
+    } catch (error) {
+      console.error('[v0] Error saving session:', error)
+    }
 
     setIsRunning(false)
     setElapsedSeconds(0)
     setStartTimeRef(null)
   }
 
-  const handleManualAdd = (data: { date: string; hours: number; minutes: number; seconds: number }) => {
-    const durationSeconds = data.hours * 3600 + data.minutes * 60 + data.seconds
-    const sessionDate = new Date(data.date + 'T12:00:00')
-    const startTime = new Date(sessionDate)
-    startTime.setHours(startTime.getHours() - 1)
-    const endTime = new Date(startTime.getTime() + durationSeconds * 1000)
+  const handleManualAdd = async (data: { date: string; hours: number; minutes: number; seconds: number }) => {
+    const durationMinutes = data.hours * 60 + data.minutes + Math.round(data.seconds / 60)
 
-    const session: StudySession = {
-      id: generateId(),
-      date: data.date,
-      startTime: startTime.toISOString(),
-      endTime: endTime.toISOString(),
-      durationSeconds,
+    try {
+      const { data: insertedData, error } = await supabase
+        .from('study_sessions')
+        .insert({
+          user_id: userId,
+          duration_minutes: durationMinutes,
+          date: data.date,
+        })
+        .select()
+
+      if (error) throw error
+
+      if (insertedData && insertedData.length > 0) {
+        setSessions([insertedData[0], ...sessions])
+      }
+
+      setShowManualForm(false)
+    } catch (error) {
+      console.error('[v0] Error adding manual session:', error)
     }
-
-    addSession(session)
-    const updatedSessions = getStoredSessions()
-    setSessions(updatedSessions)
-    setShowManualForm(false)
   }
 
-  const formatTime = (seconds: number) => {
+  const formatTime = (minutes: number) => {
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
+  }
+
+  const formatTimerDisplay = (seconds: number) => {
     const hours = Math.floor(seconds / 3600)
     const minutes = Math.floor((seconds % 3600) / 60)
     const secs = seconds % 60
     return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
   }
 
-  const todayTotal = getTodayTotal(sessions)
-  const currentStreak = getCurrentStreak(sessions)
-  const thisWeek = getWeekTotal(sessions, 0)
-  const lastWeek = getWeekTotal(sessions, 1)
-  const weekChange = lastWeek === 0 ? 0 : Math.round(((thisWeek - lastWeek) / lastWeek) * 100)
+  // Calculate statistics
+  const calculateStats = () => {
+    const today = format(new Date(), 'yyyy-MM-dd')
+    const todayTotal = sessions
+      .filter((s) => s.date === today)
+      .reduce((sum, s) => sum + s.duration_minutes, 0)
+
+    const dates = new Set(sessions.map((s) => s.date))
+    const sortedDates = Array.from(dates).sort().reverse()
+
+    let currentStreak = 0
+    let prevDate = new Date()
+    for (const dateStr of sortedDates) {
+      const sessionDate = new Date(dateStr)
+      const diffDays = Math.floor((prevDate.getTime() - sessionDate.getTime()) / (1000 * 60 * 60 * 24))
+
+      if (currentStreak === 0 || diffDays === 1) {
+        currentStreak++
+        prevDate = sessionDate
+      } else {
+        break
+      }
+    }
+
+    const thisWeekStart = new Date()
+    thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay())
+    thisWeekStart.setHours(0, 0, 0, 0)
+
+    const lastWeekStart = new Date(thisWeekStart)
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7)
+
+    const thisWeek = sessions
+      .filter((s) => {
+        const sessionDate = new Date(s.date)
+        return sessionDate >= thisWeekStart
+      })
+      .reduce((sum, s) => sum + s.duration_minutes, 0)
+
+    const lastWeek = sessions
+      .filter((s) => {
+        const sessionDate = new Date(s.date)
+        return sessionDate >= lastWeekStart && sessionDate < thisWeekStart
+      })
+      .reduce((sum, s) => sum + s.duration_minutes, 0)
+
+    const weekChange = lastWeek === 0 ? 0 : Math.round(((thisWeek - lastWeek) / lastWeek) * 100)
+
+    return { todayTotal, currentStreak, thisWeek, lastWeek, weekChange }
+  }
+
+  const { todayTotal, currentStreak, thisWeek, lastWeek, weekChange } = calculateStats()
+
+  if (loading) {
+    return (
+      <div className="w-full max-w-2xl mx-auto px-4 py-16 text-center">
+        <p className="text-text-muted">Loading...</p>
+      </div>
+    )
+  }
 
   return (
     <div className="w-full max-w-2xl mx-auto px-4 py-16">
@@ -111,7 +209,7 @@ export function Timer() {
 
       {isRunning && (
         <div className="text-center mb-12">
-          <p className="text-4xl font-light text-accent">{formatTime(elapsedSeconds)}</p>
+          <p className="text-4xl font-light text-accent">{formatTimerDisplay(elapsedSeconds)}</p>
         </div>
       )}
 
