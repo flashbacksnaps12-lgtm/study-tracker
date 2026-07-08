@@ -1,30 +1,151 @@
 'use client'
 
-import { useState, useMemo } from 'react'
-import { StudySession, getStoredSessions } from '@/lib/storage'
-import {
-  getHeatmapData,
-  getTrendData,
-  getTimeOfDayData,
-  getConsistencyScore,
-  getStats,
-  getCurrentStreak,
-  getLongestStreak,
-} from '@/lib/analytics'
-import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts'
+import { useState, useEffect, useMemo } from 'react'
+import { format, subDays, startOfDay } from 'date-fns'
+import { createClient } from '@/lib/supabase/client'
+import { BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts'
 import { Flame } from 'lucide-react'
 
-export function Insights() {
-  const [trendDays, setTrendDays] = useState(30)
-  const sessions = getStoredSessions()
+interface StudySession {
+  id: string
+  user_id: string
+  duration_minutes: number
+  date: string
+  created_at: string
+}
 
-  const heatmapData = useMemo(() => getHeatmapData(sessions), [sessions])
-  const trendData = useMemo(() => getTrendData(sessions, trendDays), [sessions, trendDays])
-  const timeOfDayData = useMemo(() => getTimeOfDayData(sessions), [sessions])
-  const consistencyScore = useMemo(() => getConsistencyScore(sessions), [sessions])
-  const stats = useMemo(() => getStats(sessions), [sessions])
-  const currentStreak = useMemo(() => getCurrentStreak(sessions), [sessions])
-  const longestStreak = useMemo(() => getLongestStreak(sessions), [sessions])
+export function Insights({ userId }: { userId: string }) {
+  const supabase = createClient()
+  const [trendDays, setTrendDays] = useState(30)
+  const [sessions, setSessions] = useState<StudySession[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchSessions = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('study_sessions')
+          .select('*')
+          .eq('user_id', userId)
+          .order('date', { ascending: false })
+
+        if (error) throw error
+        setSessions(data || [])
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchSessions()
+  }, [userId, supabase])
+
+  // Calculate heatmap data
+  const heatmapData = useMemo(() => {
+    const last365Days = []
+    for (let i = 364; i >= 0; i--) {
+      const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+      const dayTotal = sessions
+        .filter((s) => s.date === date)
+        .reduce((sum, s) => sum + s.duration_minutes, 0)
+      last365Days.push({ date, duration: dayTotal })
+    }
+    return last365Days
+  }, [sessions])
+
+  // Calculate streaks
+  const { currentStreak, longestStreak } = useMemo(() => {
+    const dates = Array.from(new Set(sessions.map((s) => s.date))).sort().reverse()
+    let current = 0
+    let longest = 0
+    let prevDate = new Date()
+
+    for (const dateStr of dates) {
+      const sessionDate = new Date(dateStr)
+      const diffDays = Math.floor((prevDate.getTime() - sessionDate.getTime()) / (1000 * 60 * 60 * 24))
+
+      if (current === 0 || diffDays === 1) {
+        current++
+        longest = Math.max(longest, current)
+        prevDate = sessionDate
+      } else {
+        break
+      }
+    }
+
+    return { currentStreak: current, longestStreak: longest }
+  }, [sessions])
+
+  // Calculate trend data
+  const trendData = useMemo(() => {
+    const data = []
+    for (let i = trendDays - 1; i >= 0; i--) {
+      const date = format(subDays(new Date(), i), 'MMM dd')
+      const dateStr = format(subDays(new Date(), i), 'yyyy-MM-dd')
+      const duration = sessions
+        .filter((s) => s.date === dateStr)
+        .reduce((sum, s) => sum + s.duration_minutes, 0)
+      data.push({ date, duration })
+    }
+    return data
+  }, [sessions, trendDays])
+
+  // Calculate time of day
+  const timeOfDayData = useMemo(() => {
+    const morning = sessions.filter((s) => parseInt(s.created_at.split('T')[1]) < 12).reduce((sum, s) => sum + s.duration_minutes, 0)
+    const afternoon = sessions.filter((s) => {
+      const hour = parseInt(s.created_at.split('T')[1])
+      return hour >= 12 && hour < 18
+    }).reduce((sum, s) => sum + s.duration_minutes, 0)
+    const evening = sessions.filter((s) => {
+      const hour = parseInt(s.created_at.split('T')[1])
+      return hour >= 18 && hour < 21
+    }).reduce((sum, s) => sum + s.duration_minutes, 0)
+    const night = sessions.filter((s) => parseInt(s.created_at.split('T')[1]) >= 21).reduce((sum, s) => sum + s.duration_minutes, 0)
+
+    return [
+      { name: 'Morning', value: morning || 0 },
+      { name: 'Afternoon', value: afternoon || 0 },
+      { name: 'Evening', value: evening || 0 },
+      { name: 'Night', value: night || 0 },
+    ].filter((d) => d.value > 0)
+  }, [sessions])
+
+  // Calculate consistency score
+  const consistencyScore = useMemo(() => {
+    const last30Days = []
+    for (let i = 29; i >= 0; i--) {
+      const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+      last30Days.push(date)
+    }
+
+    const daysWithSessions = new Set(sessions.filter((s) => last30Days.includes(s.date)).map((s) => s.date)).size
+    return Math.round((daysWithSessions / 30) * 100)
+  }, [sessions])
+
+  // Calculate statistics
+  const stats = useMemo(() => {
+    if (sessions.length === 0) {
+      return {
+        averageSessionLength: 0,
+        averageDailyTime: 0,
+        totalSessions: 0,
+        longestSession: 0,
+        totalTime: 0,
+      }
+    }
+
+    const totalTime = sessions.reduce((sum, s) => sum + s.duration_minutes, 0)
+    const uniqueDays = new Set(sessions.map((s) => s.date)).size
+    const longestSession = Math.max(...sessions.map((s) => s.duration_minutes))
+
+    return {
+      averageSessionLength: Math.round(totalTime / sessions.length),
+      averageDailyTime: Math.round(totalTime / uniqueDays),
+      totalSessions: sessions.length,
+      longestSession,
+      totalTime: Math.round(totalTime / 60),
+    }
+  }, [sessions])
 
   const maxDuration = useMemo(() => Math.max(...heatmapData.map((d) => d.duration), 1), [heatmapData])
 
@@ -39,6 +160,14 @@ export function Insights() {
 
   const COLORS = ['#10b981', '#0d9488', '#059669', '#047857']
 
+  if (loading) {
+    return (
+      <div className="w-full max-w-6xl mx-auto px-4 py-12 text-center">
+        <p className="text-text-muted">Loading insights...</p>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full max-w-6xl mx-auto px-4 py-12">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
@@ -51,10 +180,10 @@ export function Insights() {
                   <div
                     key={idx}
                     className={`w-3 h-3 rounded-sm bg-accent ${getIntensity(day.duration)} transition-opacity hover:opacity-100 cursor-pointer group relative`}
-                    title={`${day.date}: ${Math.round(day.duration / 60)} min`}
+                    title={`${day.date}: ${day.duration} min`}
                   >
                     <div className="opacity-0 group-hover:opacity-100 absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-surface rounded text-xs text-foreground whitespace-nowrap pointer-events-none transition-opacity">
-                      {Math.round(day.duration / 60)} min
+                      {day.duration} min
                     </div>
                   </div>
                 ))}
@@ -147,14 +276,7 @@ export function Insights() {
             <div className="flex flex-col items-center justify-center h-64">
               <div className="relative w-48 h-48">
                 <svg className="w-full h-full" viewBox="0 0 100 100">
-                  <circle
-                    cx="50"
-                    cy="50"
-                    r="45"
-                    fill="none"
-                    stroke="#2a2a2a"
-                    strokeWidth="8"
-                  />
+                  <circle cx="50" cy="50" r="45" fill="none" stroke="#2a2a2a" strokeWidth="8" />
                   <circle
                     cx="50"
                     cy="50"
