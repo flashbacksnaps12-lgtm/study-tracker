@@ -150,42 +150,55 @@ export function Timer({ userId }: { userId: string }) {
 
   const handleStart = async () => {
     if (isPaused) {
-      // Resuming from pause: start a fresh "running" row, carrying forward
-      // the seconds already accumulated as paused_duration_minutes
+      // Resuming from pause: write the new "running" row FIRST using a
+      // single atomic upsert (not delete-then-insert, which left a window
+      // where the database had no active_sessions row at all if the insert
+      // failed or was interrupted — causing the session to vanish on reload).
+      // Only update the UI once the write is confirmed successful.
       const now = new Date()
-      setIsRunning(true)
-      setIsPaused(false)
-      setStartTimeRef(now)
+      const carriedMinutes = Math.floor(pausedAtSeconds / 60)
 
       try {
-        await clearActiveSession()
-        const { error } = await supabase.from('active_sessions').insert({
-          user_id: userId,
-          started_at: now.toISOString(),
-          paused_at: null,
-          paused_duration_minutes: Math.floor(pausedAtSeconds / 60),
-          status: 'running',
-        })
+        const { error } = await supabase.from('active_sessions').upsert(
+          {
+            user_id: userId,
+            started_at: now.toISOString(),
+            paused_at: null,
+            paused_duration_minutes: carriedMinutes,
+            status: 'running',
+          },
+          { onConflict: 'user_id' }
+        )
         if (error) throw error
+
+        setIsRunning(true)
+        setIsPaused(false)
+        setStartTimeRef(now)
       } catch (error) {
         console.error('[v0] Error resuming session:', error)
+        alert('Could not resume the timer — please check your connection and try again. Your paused time is safe.')
       }
     } else {
       const now = new Date()
-      setIsRunning(true)
-      setStartTimeRef(now)
 
       try {
-        const { error } = await supabase.from('active_sessions').insert({
-          user_id: userId,
-          started_at: now.toISOString(),
-          paused_at: null,
-          paused_duration_minutes: 0,
-          status: 'running',
-        })
+        const { error } = await supabase.from('active_sessions').upsert(
+          {
+            user_id: userId,
+            started_at: now.toISOString(),
+            paused_at: null,
+            paused_duration_minutes: 0,
+            status: 'running',
+          },
+          { onConflict: 'user_id' }
+        )
         if (error) throw error
+
+        setIsRunning(true)
+        setStartTimeRef(now)
       } catch (error) {
         console.error('[v0] Error starting session:', error)
+        alert('Could not start the timer — please check your connection and try again.')
       }
     }
   }
