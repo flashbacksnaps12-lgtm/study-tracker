@@ -150,21 +150,22 @@ export function Timer({ userId }: { userId: string }) {
 
   const handleStart = async () => {
     if (isPaused) {
-      // Resuming from pause: write the new "running" row FIRST using a
-      // single atomic upsert (not delete-then-insert, which left a window
-      // where the database had no active_sessions row at all if the insert
-      // failed or was interrupted — causing the session to vanish on reload).
-      // Only update the UI once the write is confirmed successful.
+      // Resuming from pause: startTimeRef must be shifted BACKWARD by the
+      // time already elapsed before the pause (pausedAtSeconds), not reset
+      // to "now" — otherwise the live ticking effect recomputes elapsed as
+      // (now - startTimeRef) which would be ~0, wiping the displayed time
+      // back to zero the instant you resume.
       const now = new Date()
+      const adjustedStart = new Date(now.getTime() - pausedAtSeconds * 1000)
       const carriedMinutes = Math.floor(pausedAtSeconds / 60)
 
       try {
         const { error } = await supabase.from('active_sessions').upsert(
           {
             user_id: userId,
-            started_at: now.toISOString(),
+            started_at: adjustedStart.toISOString(),
             paused_at: null,
-            paused_duration_minutes: carriedMinutes,
+            paused_duration_minutes: 0,
             status: 'running',
           },
           { onConflict: 'user_id' }
@@ -173,7 +174,8 @@ export function Timer({ userId }: { userId: string }) {
 
         setIsRunning(true)
         setIsPaused(false)
-        setStartTimeRef(now)
+        setStartTimeRef(adjustedStart)
+        setElapsedSeconds(pausedAtSeconds)
       } catch (error) {
         console.error('[v0] Error resuming session:', error)
         alert('Could not resume the timer — please check your connection and try again. Your paused time is safe.')
@@ -196,6 +198,7 @@ export function Timer({ userId }: { userId: string }) {
 
         setIsRunning(true)
         setStartTimeRef(now)
+        setElapsedSeconds(0)
       } catch (error) {
         console.error('[v0] Error starting session:', error)
         alert('Could not start the timer — please check your connection and try again.')
