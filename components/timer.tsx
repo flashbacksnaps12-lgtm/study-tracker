@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { format } from 'date-fns'
 import { createClient } from '@/lib/supabase/client'
-import { ArrowUp, Plus } from 'lucide-react'
+import { ArrowUp, Plus, Trash2 } from 'lucide-react'
 
 interface StudySession {
   id: string
@@ -16,8 +16,11 @@ interface StudySession {
 export function Timer({ userId }: { userId: string }) {
   const supabase = createClient()
   const [isRunning, setIsRunning] = useState(false)
+  const [isPaused, setIsPaused] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [startTimeRef, setStartTimeRef] = useState<Date | null>(null)
+  const [pausedAtSeconds, setPausedAtSeconds] = useState(0)
+  const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [showManualForm, setShowManualForm] = useState(false)
   const [sessions, setSessions] = useState<StudySession[]>([])
   const [loading, setLoading] = useState(true)
@@ -59,11 +62,25 @@ export function Timer({ userId }: { userId: string }) {
   }, [isRunning, startTimeRef])
 
   const handleStart = () => {
-    setIsRunning(true)
-    setStartTimeRef(new Date())
+    if (isPaused) {
+      setIsRunning(true)
+      setIsPaused(false)
+      const now = new Date()
+      const adjustment = pausedAtSeconds * 1000
+      setStartTimeRef(new Date(now.getTime() - adjustment))
+    } else {
+      setIsRunning(true)
+      setStartTimeRef(new Date())
+    }
   }
 
-  const handleStop = async () => {
+  const handlePause = () => {
+    setIsRunning(false)
+    setIsPaused(true)
+    setPausedAtSeconds(elapsedSeconds)
+  }
+
+  const handleSaveSession = async () => {
     if (!startTimeRef) return
 
     const durationMinutes = Math.round(elapsedSeconds / 60)
@@ -89,8 +106,44 @@ export function Timer({ userId }: { userId: string }) {
     }
 
     setIsRunning(false)
+    setIsPaused(false)
     setElapsedSeconds(0)
     setStartTimeRef(null)
+    setPausedAtSeconds(0)
+    setShowSaveDialog(false)
+  }
+
+  const handleDiscard = () => {
+    setIsRunning(false)
+    setIsPaused(false)
+    setElapsedSeconds(0)
+    setStartTimeRef(null)
+    setPausedAtSeconds(0)
+    setShowSaveDialog(false)
+  }
+
+  const handleDeleteSession = async (sessionId: string, createdAt: string) => {
+    const createdDate = new Date(createdAt)
+    const now = new Date()
+    const hoursDiff = (now.getTime() - createdDate.getTime()) / (1000 * 60 * 60)
+
+    if (hoursDiff > 24) {
+      alert('You can only delete sessions within 24 hours of creation')
+      return
+    }
+
+    try {
+      const { error } = await supabase
+        .from('study_sessions')
+        .delete()
+        .eq('id', sessionId)
+
+      if (error) throw error
+
+      setSessions(sessions.filter((s) => s.id !== sessionId))
+    } catch (error) {
+      console.error('[v0] Error deleting session:', error)
+    }
   }
 
   const handleManualAdd = async (data: { date: string; hours: number; minutes: number; seconds: number }) => {
@@ -198,18 +251,65 @@ export function Timer({ userId }: { userId: string }) {
         <p className="text-6xl font-light text-foreground mb-1">{formatTime(todayTotal)}</p>
       </div>
 
-      <div className="flex justify-center mb-16">
-        <button
-          onClick={isRunning ? handleStop : handleStart}
-          className="w-32 h-32 rounded-full bg-accent text-accent-foreground text-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center"
-        >
-          {isRunning ? 'Stop' : 'Start'}
-        </button>
+      <div className="flex justify-center gap-4 mb-16">
+        {!isPaused && !isRunning && (
+          <button
+            onClick={handleStart}
+            className="w-32 h-32 rounded-full bg-accent text-accent-foreground text-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center"
+          >
+            Start
+          </button>
+        )}
+        {isRunning && (
+          <button
+            onClick={handlePause}
+            className="w-32 h-32 rounded-full bg-accent text-accent-foreground text-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center"
+          >
+            Pause
+          </button>
+        )}
+        {isPaused && (
+          <>
+            <button
+              onClick={handleStart}
+              className="w-32 h-32 rounded-full bg-accent text-accent-foreground text-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center"
+            >
+              Resume
+            </button>
+            <button
+              onClick={() => setShowSaveDialog(true)}
+              className="w-32 h-32 rounded-full bg-emerald-600 text-accent-foreground text-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center"
+            >
+              Save
+            </button>
+          </>
+        )}
       </div>
 
-      {isRunning && (
+      {(isRunning || isPaused) && (
         <div className="text-center mb-12">
           <p className="text-4xl font-light text-accent">{formatTimerDisplay(elapsedSeconds)}</p>
+        </div>
+      )}
+
+      {showSaveDialog && (
+        <div className="mb-12 bg-card rounded-lg p-6 max-w-md mx-auto border border-border">
+          <p className="text-foreground mb-4">Save this session?</p>
+          <p className="text-sm text-muted-foreground mb-4">{formatTimerDisplay(elapsedSeconds)}</p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleSaveSession}
+              className="flex-1 px-4 py-2 bg-accent text-accent-foreground rounded text-sm font-medium hover:opacity-90 transition-opacity"
+            >
+              Save Session
+            </button>
+            <button
+              onClick={handleDiscard}
+              className="flex-1 px-4 py-2 bg-red-600 text-accent-foreground rounded text-sm font-medium hover:opacity-90 transition-opacity"
+            >
+              Discard
+            </button>
+          </div>
         </div>
       )}
 
@@ -232,7 +332,7 @@ export function Timer({ userId }: { userId: string }) {
         </div>
       </div>
 
-      <div className="text-center">
+      <div className="text-center mb-8">
         <button
           onClick={() => setShowManualForm(!showManualForm)}
           className="text-sm text-accent hover:text-accent-bright transition-colors flex items-center justify-center gap-1 mx-auto"
@@ -243,6 +343,47 @@ export function Timer({ userId }: { userId: string }) {
       </div>
 
       {showManualForm && <ManualSessionForm onSubmit={handleManualAdd} />}
+
+      <div className="mt-12">
+        <h3 className="text-sm font-semibold text-muted-foreground mb-4">TODAY&apos;S SESSIONS</h3>
+        {sessions
+          .filter((s) => s.date === format(new Date(), 'yyyy-MM-dd'))
+          .length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-4">No sessions today yet</p>
+        ) : (
+          <div className="space-y-2">
+            {sessions
+              .filter((s) => s.date === format(new Date(), 'yyyy-MM-dd'))
+              .map((session) => {
+                const hours = Math.floor(session.duration_minutes / 60)
+                const mins = session.duration_minutes % 60
+                const canDelete =
+                  (new Date().getTime() - new Date(session.created_at).getTime()) / (1000 * 60 * 60) <= 24
+
+                return (
+                  <div key={session.id} className="flex items-center justify-between bg-card rounded-lg p-4">
+                    <div>
+                      <p className="text-foreground">
+                        {hours}h {mins}m
+                      </p>
+                      <p className="text-xs text-muted-foreground">{format(new Date(session.created_at), 'HH:mm')}</p>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteSession(session.id, session.created_at)}
+                      disabled={!canDelete}
+                      className={`p-2 rounded transition-colors ${
+                        canDelete ? 'text-red-500 hover:bg-red-500/10' : 'text-muted-foreground opacity-50 cursor-not-allowed'
+                      }`}
+                      title={canDelete ? 'Delete session' : 'Can only delete within 24 hours'}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )
+              })}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
