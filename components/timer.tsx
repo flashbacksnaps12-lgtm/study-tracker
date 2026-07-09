@@ -90,10 +90,16 @@ export function Timer({ userId }: { userId: string }) {
 
   // Live ticking display while running.
   // Always recompute elapsed time from the real clock (startTimeRef -> now)
-  // rather than incrementing a counter, since setInterval gets throttled by
-  // the browser/OS when the window is minimized, backgrounded, or the screen
-  // locks. Recomputing from real timestamps means the displayed number is
-  // always correct whenever the tick does fire, even if ticks were skipped.
+  // rather than incrementing a counter, since setInterval gets throttled —
+  // or after an OS-level sleep, can stop firing entirely — when the window
+  // is minimized, backgrounded, or the laptop sleeps.
+  //
+  // Since a watchdog built from another setInterval would have the exact
+  // same sleep-vulnerability as the thing it's trying to fix, this instead
+  // hooks every event that reliably fires when a browser tab resumes after
+  // sleep (visibilitychange, focus, pageshow), plus a one-time click
+  // fallback on the document as a last resort in case none of those fire
+  // in this particular browser after this particular sleep.
   useEffect(() => {
     if (!isRunning || !startTimeRef) return
 
@@ -103,25 +109,33 @@ export function Timer({ userId }: { userId: string }) {
       setElapsedSeconds(diff)
     }
 
-    // Recompute immediately (covers the moment Start/Resume is clicked)
+    const startInterval = () => {
+      clearInterval(interval)
+      interval = setInterval(recompute, 1000)
+    }
+
+    let interval = setInterval(recompute, 1000)
     recompute()
 
-    const interval = setInterval(recompute, 1000)
-
-    // Snap to the correct value the instant the tab/window becomes visible
-    // again, instead of waiting for the next (possibly throttled) tick
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        recompute()
-      }
+    const handleWake = () => {
+      recompute()
+      startInterval()
     }
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    window.addEventListener('focus', recompute)
+
+    document.addEventListener('visibilitychange', handleWake)
+    window.addEventListener('focus', handleWake)
+    window.addEventListener('pageshow', handleWake)
+    // Last-resort fallback: any click anywhere in the app also triggers a
+    // recompute, so even if every resume event is missed, the number self-
+    // corrects the moment the user touches the page again.
+    document.addEventListener('click', recompute)
 
     return () => {
       clearInterval(interval)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('focus', recompute)
+      document.removeEventListener('visibilitychange', handleWake)
+      window.removeEventListener('focus', handleWake)
+      window.removeEventListener('pageshow', handleWake)
+      document.removeEventListener('click', recompute)
     }
   }, [isRunning, startTimeRef])
 
