@@ -88,18 +88,40 @@ export function Timer({ userId }: { userId: string }) {
     init()
   }, [userId, supabase])
 
-  // Live ticking display while running
+  // Live ticking display while running.
+  // Always recompute elapsed time from the real clock (startTimeRef -> now)
+  // rather than incrementing a counter, since setInterval gets throttled by
+  // the browser/OS when the window is minimized, backgrounded, or the screen
+  // locks. Recomputing from real timestamps means the displayed number is
+  // always correct whenever the tick does fire, even if ticks were skipped.
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
+    if (!isRunning || !startTimeRef) return
 
-    if (isRunning && startTimeRef) {
-      interval = setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1)
-      }, 1000)
+    const recompute = () => {
+      const now = new Date()
+      const diff = Math.floor((now.getTime() - startTimeRef.getTime()) / 1000)
+      setElapsedSeconds(diff)
     }
 
+    // Recompute immediately (covers the moment Start/Resume is clicked)
+    recompute()
+
+    const interval = setInterval(recompute, 1000)
+
+    // Snap to the correct value the instant the tab/window becomes visible
+    // again, instead of waiting for the next (possibly throttled) tick
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        recompute()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', recompute)
+
     return () => {
-      if (interval) clearInterval(interval)
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', recompute)
     }
   }, [isRunning, startTimeRef])
 
