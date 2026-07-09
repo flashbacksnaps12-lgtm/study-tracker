@@ -13,6 +13,15 @@ interface StudySession {
   created_at: string
 }
 
+interface ActiveSession {
+  id: string
+  user_id: string
+  started_at: string
+  paused_at: string | null
+  paused_duration_minutes: number
+  status: 'running' | 'paused'
+}
+
 export function Timer({ userId }: { userId: string }) {
   const supabase = createClient()
   const [isRunning, setIsRunning] = useState(false)
@@ -25,35 +34,68 @@ export function Timer({ userId }: { userId: string }) {
   const [sessions, setSessions] = useState<StudySession[]>([])
   const [loading, setLoading] = useState(true)
 
-  // Fetch sessions from Supabase
+  // Fetch past sessions + resume any active (running/paused) session on load
   useEffect(() => {
-    const fetchSessions = async () => {
+    const init = async () => {
       try {
-        const { data, error } = await supabase
-          .from('study_sessions')
-          .select('*')
-          .eq('user_id', userId)
-          .order('date', { ascending: false })
+        const [sessionsRes, activeRes] = await Promise.all([
+          supabase
+            .from('study_sessions')
+            .select('*')
+            .eq('user_id', userId)
+            .order('date', { ascending: false }),
+          supabase
+            .from('active_sessions')
+            .select('*')
+            .eq('user_id', userId)
+            .maybeSingle(),
+        ])
 
-        if (error) throw error
-        setSessions(data || [])
+        if (sessionsRes.error) throw sessionsRes.error
+        setSessions(sessionsRes.data || [])
+
+        const active: ActiveSession | null = activeRes.data
+        if (active) {
+          const started = new Date(active.started_at)
+          setStartTimeRef(started)
+
+          if (active.status === 'paused') {
+            // Elapsed at the moment it was paused = time from start to paused_at,
+            // plus any previously accumulated paused_duration_minutes from earlier pause/resume cycles
+            const pausedAt = active.paused_at ? new Date(active.paused_at) : new Date()
+            const runSeconds = Math.floor((pausedAt.getTime() - started.getTime()) / 1000)
+            const totalElapsed = runSeconds + active.paused_duration_minutes * 60
+            setIsPaused(true)
+            setIsRunning(false)
+            setPausedAtSeconds(totalElapsed)
+            setElapsedSeconds(totalElapsed)
+          } else {
+            // Was running when app closed — recompute live elapsed from timestamp
+            setIsRunning(true)
+            setIsPaused(false)
+            const now = new Date()
+            const diff = Math.floor((now.getTime() - started.getTime()) / 1000) + active.paused_duration_minutes * 60
+            setElapsedSeconds(diff)
+          }
+        }
+      } catch (error) {
+        console.error('[v0] Error loading timer state:', error)
       } finally {
         setLoading(false)
       }
     }
 
-    fetchSessions()
+    init()
   }, [userId, supabase])
 
+  // Live ticking display while running
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
 
     if (isRunning && startTimeRef) {
       interval = setInterval(() => {
-        const now = new Date()
-        const diff = Math.floor((now.getTime() - startTimeRef.getTime()) / 1000)
-        setElapsedSeconds(diff)
-      }, 100)
+        setElapsedSeconds((prev) => prev + 1)
+      }, 1000)
     }
 
     return () => {
@@ -61,23 +103,75 @@ export function Timer({ userId }: { userId: string }) {
     }
   }, [isRunning, startTimeRef])
 
-  const handleStart = () => {
-    if (isPaused) {
-      setIsRunning(true)
-      setIsPaused(false)
-      const now = new Date()
-      const adjustment = pausedAtSeconds * 1000
-      setStartTimeRef(new Date(now.getTime() - adjustment))
-    } else {
-      setIsRunning(true)
-      setStartTimeRef(new Date())
+  const clearActiveSession = async () => {
+    try {
+      const { error } = await supabase.from('active_sessions').delete().eq('user_id', userId)
+      if (error) throw error
+    } catch (error) {
+      console.error('[v0] Error clearing active session:', error)
     }
   }
 
-  const handlePause = () => {
+  const handleStart = async () => {
+    if (isPaused) {
+      // Resuming from pause: start a fresh "running" row, carrying forward
+      // the seconds already accumulated as paused_duration_minutes
+      const now = new Date()
+      setIsRunning(true)
+      setIsPaused(false)
+      setStartTimeRef(now)
+
+      try {
+        await clearActiveSession()
+        const { error } = await supabase.from('active_sessions').insert({
+          user_id: userId,
+          started_at: now.toISOString(),
+          paused_at: null,
+          paused_duration_minutes: Math.floor(pausedAtSeconds / 60),
+          status: 'running',
+        })
+        if (error) throw error
+      } catch (error) {
+        console.error('[v0] Error resuming session:', error)
+      }
+    } else {
+      const now = new Date()
+      setIsRunning(true)
+      setStartTimeRef(now)
+
+      try {
+        const { error } = await supabase.from('active_sessions').insert({
+          user_id: userId,
+          started_at: now.toISOString(),
+          paused_at: null,
+          paused_duration_minutes: 0,
+          status: 'running',
+        })
+        if (error) throw error
+      } catch (error) {
+        console.error('[v0] Error starting session:', error)
+      }
+    }
+  }
+
+  const handlePause = async () => {
+    const now = new Date()
     setIsRunning(false)
     setIsPaused(true)
     setPausedAtSeconds(elapsedSeconds)
+
+    try {
+      const { error } = await supabase
+        .from('active_sessions')
+        .update({
+          status: 'paused',
+          paused_at: now.toISOString(),
+        })
+        .eq('user_id', userId)
+      if (error) throw error
+    } catch (error) {
+      console.error('[v0] Error pausing session:', error)
+    }
   }
 
   const handleSaveSession = async () => {
@@ -105,6 +199,8 @@ export function Timer({ userId }: { userId: string }) {
       console.error('[v0] Error saving session:', error)
     }
 
+    await clearActiveSession()
+
     setIsRunning(false)
     setIsPaused(false)
     setElapsedSeconds(0)
@@ -113,7 +209,8 @@ export function Timer({ userId }: { userId: string }) {
     setShowSaveDialog(false)
   }
 
-  const handleDiscard = () => {
+  const handleDiscard = async () => {
+    await clearActiveSession()
     setIsRunning(false)
     setIsPaused(false)
     setElapsedSeconds(0)
@@ -289,6 +386,9 @@ export function Timer({ userId }: { userId: string }) {
       {(isRunning || isPaused) && (
         <div className="text-center mb-12">
           <p className="text-4xl font-light text-accent">{formatTimerDisplay(elapsedSeconds)}</p>
+          {isPaused && (
+            <p className="text-xs text-muted-foreground mt-2">Paused — resume anytime, even after closing the app</p>
+          )}
         </div>
       )}
 
