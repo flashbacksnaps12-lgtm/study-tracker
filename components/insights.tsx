@@ -3,7 +3,22 @@
 import { useState, useEffect, useMemo } from 'react'
 import { format, subDays, startOfDay } from 'date-fns'
 import { createClient } from '@/lib/supabase/client'
-import { BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts'
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  AreaChart,
+  Area,
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from 'recharts'
 import { Flame } from 'lucide-react'
 
 interface StudySession {
@@ -17,6 +32,7 @@ interface StudySession {
 export function Insights({ userId }: { userId: string }) {
   const supabase = createClient()
   const [trendDays, setTrendDays] = useState(30)
+  const [chartType, setChartType] = useState<'bar' | 'line' | 'area'>('bar')
   const [sessions, setSessions] = useState<StudySession[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -149,13 +165,14 @@ export function Insights({ userId }: { userId: string }) {
 
   const maxDuration = useMemo(() => Math.max(...heatmapData.map((d) => d.duration), 1), [heatmapData])
 
-  const getIntensity = (duration: number) => {
-    if (duration === 0) return 'opacity-10'
+  const getHeatmapColor = (duration: number) => {
+    if (duration === 0) return { color: 'bg-slate-700', opacity: 'opacity-20' }
+    if (duration >= 480) return { color: 'bg-purple-600', opacity: 'opacity-100' } // 8+ hours = purple
     const intensity = duration / maxDuration
-    if (intensity < 0.25) return 'opacity-25'
-    if (intensity < 0.5) return 'opacity-40'
-    if (intensity < 0.75) return 'opacity-60'
-    return 'opacity-100'
+    if (intensity < 0.25) return { color: 'bg-accent', opacity: 'opacity-25' }
+    if (intensity < 0.5) return { color: 'bg-accent', opacity: 'opacity-40' }
+    if (intensity < 0.75) return { color: 'bg-accent', opacity: 'opacity-60' }
+    return { color: 'bg-accent', opacity: 'opacity-100' }
   }
 
   const COLORS = ['#10b981', '#0d9488', '#059669', '#047857']
@@ -176,17 +193,24 @@ export function Insights({ userId }: { userId: string }) {
           <div className="bg-card rounded-lg p-6">
             <div className="overflow-x-auto">
               <div className="grid grid-cols-53 gap-1 min-w-max">
-                {heatmapData.map((day, idx) => (
-                  <div
-                    key={idx}
-                    className={`w-3 h-3 rounded-sm bg-accent ${getIntensity(day.duration)} transition-opacity hover:opacity-100 cursor-pointer group relative`}
-                    title={`${day.date}: ${day.duration} min`}
-                  >
-                    <div className="opacity-0 group-hover:opacity-100 absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-surface rounded text-xs text-foreground whitespace-nowrap pointer-events-none transition-opacity">
-                      {day.duration} min
+                {heatmapData.map((day, idx) => {
+                  const { color, opacity } = getHeatmapColor(day.duration)
+                  const hours = Math.floor(day.duration / 60)
+                  const mins = day.duration % 60
+                  const displayText = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`w-3 h-3 rounded-sm ${color} ${opacity} transition-opacity hover:opacity-100 cursor-pointer group relative`}
+                      title={`${day.date}: ${displayText}`}
+                    >
+                      <div className="opacity-0 group-hover:opacity-100 absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-surface rounded text-xs text-foreground whitespace-nowrap pointer-events-none transition-opacity">
+                        {displayText}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           </div>
@@ -209,37 +233,82 @@ export function Insights({ userId }: { userId: string }) {
       </div>
 
       <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between mb-4 gap-4">
           <h2 className="text-sm font-semibold text-muted-foreground">TREND</h2>
-          <div className="flex gap-2">
-            {[7, 30, 90, 365].map((days) => (
-              <button
-                key={days}
-                onClick={() => setTrendDays(days)}
-                className={`px-3 py-1 text-xs rounded transition-colors ${
-                  trendDays === days
-                    ? 'bg-accent text-accent-foreground'
-                    : 'bg-card text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {days === 7 ? '7d' : days === 30 ? '30d' : days === 90 ? '90d' : '1y'}
-              </button>
-            ))}
+          <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-1">
+              {[7, 30, 90, 365].map((days) => (
+                <button
+                  key={days}
+                  onClick={() => setTrendDays(days)}
+                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                    trendDays === days
+                      ? 'bg-accent text-accent-foreground'
+                      : 'bg-card text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {days === 7 ? 'Daily' : days === 30 ? 'Weekly' : days === 90 ? 'Monthly' : '1y'}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {(['bar', 'line', 'area'] as const).map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setChartType(type)}
+                  className={`px-3 py-1 text-xs rounded transition-colors capitalize ${
+                    chartType === type
+                      ? 'bg-accent text-accent-foreground'
+                      : 'bg-card text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <div className="bg-card rounded-lg p-6">
           <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={trendData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
-              <XAxis dataKey="date" tick={{ fill: '#a0a0a0', fontSize: 12 }} />
-              <YAxis tick={{ fill: '#a0a0a0', fontSize: 12 }} />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '4px' }}
-                labelStyle={{ color: '#ffffff' }}
-                formatter={(value: any) => `${value} min`}
-              />
-              <Bar dataKey="duration" fill="#10b981" radius={[4, 4, 0, 0]} />
-            </BarChart>
+            {chartType === 'bar' && (
+              <BarChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+                <XAxis dataKey="date" tick={{ fill: '#a0a0a0', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#a0a0a0', fontSize: 12 }} label={{ value: 'Hours', angle: -90, position: 'insideLeft' }} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '4px' }}
+                  labelStyle={{ color: '#ffffff' }}
+                  formatter={(value: any) => `${(value / 60).toFixed(1)} h`}
+                />
+                <Bar dataKey="duration" fill="#10b981" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            )}
+            {chartType === 'line' && (
+              <LineChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+                <XAxis dataKey="date" tick={{ fill: '#a0a0a0', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#a0a0a0', fontSize: 12 }} label={{ value: 'Hours', angle: -90, position: 'insideLeft' }} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '4px' }}
+                  labelStyle={{ color: '#ffffff' }}
+                  formatter={(value: any) => `${(value / 60).toFixed(1)} h`}
+                />
+                <Line type="monotone" dataKey="duration" stroke="#10b981" strokeWidth={2} dot={false} />
+              </LineChart>
+            )}
+            {chartType === 'area' && (
+              <AreaChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+                <XAxis dataKey="date" tick={{ fill: '#a0a0a0', fontSize: 12 }} />
+                <YAxis tick={{ fill: '#a0a0a0', fontSize: 12 }} label={{ value: 'Hours', angle: -90, position: 'insideLeft' }} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: '4px' }}
+                  labelStyle={{ color: '#ffffff' }}
+                  formatter={(value: any) => `${(value / 60).toFixed(1)} h`}
+                />
+                <Area type="monotone" dataKey="duration" fill="#10b98133" stroke="#10b981" strokeWidth={2} />
+              </AreaChart>
+            )}
           </ResponsiveContainer>
         </div>
       </div>
@@ -255,7 +324,7 @@ export function Insights({ userId }: { userId: string }) {
                   cx="50%"
                   cy="50%"
                   labelLine={false}
-                  label={({ name, value }) => `${name.split(' ')[0]} ${value}m`}
+                  label={({ name, value }) => `${name.split(' ')[0]} ${(value / 60).toFixed(1)}h`}
                   outerRadius={80}
                   fill="#10b981"
                   dataKey="value"
@@ -264,7 +333,7 @@ export function Insights({ userId }: { userId: string }) {
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value: any) => `${value} min`} />
+                <Tooltip formatter={(value: any) => `${(value / 60).toFixed(1)} h`} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -304,11 +373,14 @@ export function Insights({ userId }: { userId: string }) {
       <div>
         <h2 className="text-sm font-semibold text-muted-foreground mb-4">STATISTICS</h2>
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <StatCard label="Average Session" value={`${stats.averageSessionLength} min`} />
-          <StatCard label="Average Daily" value={`${stats.averageDailyTime} min`} />
+          <StatCard
+            label="Average Session"
+            value={`${Math.floor(stats.averageSessionLength / 60)}h ${stats.averageSessionLength % 60}m`}
+          />
+          <StatCard label="Average Daily" value={`${Math.floor(stats.averageDailyTime / 60)}h ${stats.averageDailyTime % 60}m`} />
           <StatCard label="Total Sessions" value={stats.totalSessions.toString()} />
-          <StatCard label="Longest Session" value={`${stats.longestSession} min`} />
-          <StatCard label="Total Time" value={`${stats.totalTime} h`} />
+          <StatCard label="Longest Session" value={`${Math.floor(stats.longestSession / 60)}h ${stats.longestSession % 60}m`} />
+          <StatCard label="Total Time" value={`${Math.floor(stats.totalTime)}h`} />
           <StatCard label="Unique Days" value={new Set(sessions.map((s) => s.date)).size.toString()} />
         </div>
       </div>
